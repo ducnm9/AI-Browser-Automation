@@ -1,0 +1,31 @@
+# AI Browser Automation — default configuration
+#
+# API keys are loaded from environment variables (never stored here):
+#   OPENAI_API_KEY    — OpenAI ChatGPT key (must start with "sk-")
+#   GEMINI_API_KEY    — Google Gemini key
+#   AWS_DEFAULT_REGION — AWS region for Bedrock
+#   LM_STUDIO_URL     — Override the LM Studio URL below
+
+# Default LLM provider: lm_studio | openai | gemini | bedrock
+default_llm: lm_studio
+
+# LM Studio local server
+lm_studio_url: "http://localhost:1234/v1"
+lm_studio_model: "google/gemma-4-e2b"
+
+# OpenAI (optional)
+# openai_model: "gpt-4"
+
+# Gemini (optional)
+# gemini_model: "gemini-pro"
+
+# Bedrock (optional)
+# bedrock_model: "anthropic.claude-3-sonnet-20240229-v1:0"
+
+# Browser engine: playwright (primary) or selenium (fallback)
+browser_engine: playwright
+headless: false
+
+# Performance tuning
+action_timeout_ms: 10000
+max_retries: 3

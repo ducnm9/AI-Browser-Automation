@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Verify Conventions After Task",
+  "description": "Sau khi hoàn thành mỗi task trong spec, agent tự động kiểm tra lại code đã viết có tuân thủ conventions không.",
+  "version": "1",
+  "when": {
+    "type": "postTaskExecution"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Task vừa hoàn thành. Hãy review nhanh các file Python đã tạo/sửa trong task này và kiểm tra:\n\n1. Tất cả functions có type hints đầy đủ không?\n2. Public methods có Google-style docstrings không?\n3. Dependencies được inject qua constructor (không hardcode)?\n4. Import order đúng: stdlib → third-party → local?\n5. Có `from __future__ import annotations` ở đầu file?\n6. Có `__all__` trong `__init__.py`?\n7. Error handling dùng custom exceptions (không bare except)?\n8. Không hardcode API keys hoặc secrets?\n9. Sensitive data có đi qua SecurityLayer?\n10. File đặt đúng vị trí theo project structure?\n\nNếu phát hiện vi phạm, sửa ngay."
+  }
+}

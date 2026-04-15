@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "Load Conventions on Prompt",
+  "description": "Khi nhận prompt mới liên quan đến code, agent được nhắc nhở đọc và tuân thủ steering files.",
+  "version": "1",
+  "when": {
+    "type": "promptSubmit"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Nhắc nhở: Dự án AI Browser Automation có các quy tắc bắt buộc trong .kiro/steering/. Khi viết hoặc sửa code Python, PHẢI tuân thủ:\n- .kiro/steering/design-patterns.md (Strategy, DI, Factory, Facade...)\n- .kiro/steering/python-conventions.md (type hints, docstrings, naming, imports...)\n- .kiro/steering/project-structure.md (cấu trúc thư mục, dependency direction)\n- .kiro/steering/security-rules.md (no hardcoded secrets, sanitize sensitive data, no logging PII)\n\nKhi tạo LLM provider mới → xem .kiro/skills/llm-provider-creator.md\nKhi tạo browser engine mới → xem .kiro/skills/browser-engine-creator.md\nKhi tạo module Python mới → xem .kiro/skills/python-module-creator.md"
+  }
+}
