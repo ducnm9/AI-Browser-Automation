@@ -165,6 +165,26 @@ class BrowserEngine(ABC):
         ...
 
     @abstractmethod
+    async def extract_page_text(
+        self, max_length: int = 8000,
+    ) -> str:
+        """Extract readable text content from the current page.
+
+        Strips navigation, scripts, styles, and ads to return
+        only the main content text, suitable for LLM analysis.
+
+        Args:
+            max_length: Maximum character length of the output.
+
+        Returns:
+            Cleaned text content from the page body.
+
+        Raises:
+            BrowserError: If text extraction fails.
+        """
+        ...
+
+    @abstractmethod
     async def close(self) -> None:
         """Close the browser and clean up resources."""
         ...

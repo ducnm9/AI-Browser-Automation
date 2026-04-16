@@ -80,6 +80,39 @@ _EXTRACT_CONTENT_JS = """
 }
 """ % (_MAX_CONTENT_SNIPPETS, _CONTENT_TEXT_LENGTH)
 
+# JavaScript snippet to extract readable text from the page,
+# stripping navigation, ads, scripts, and style elements.
+# Returns HTML (not plain text) to preserve links.
+_EXTRACT_PAGE_TEXT_JS = """
+() => {
+    const clone = document.body.cloneNode(true);
+    const remove = 'nav, footer, header, script, style, '
+                 + 'noscript, svg, iframe, [role="navigation"], '
+                 + '[role="banner"], [class*="menu"], '
+                 + '[class*="sidebar"], [class*="footer"], '
+                 + '[class*="header"], [class*="nav-"], '
+                 + '[class*="advert"], [class*="banner"], '
+                 + '[id*="comment"], form, img, video, '
+                 + '[class*="widget"], [class*="social"]';
+    clone.querySelectorAll(remove).forEach(el => el.remove());
+
+    // Convert links to markdown-style for readability
+    clone.querySelectorAll('a[href]').forEach(a => {
+        const text = (a.textContent || "").trim();
+        const href = a.getAttribute('href') || "";
+        if (text && href && text.length > 5) {
+            a.textContent = text + " (" + href + ")";
+        }
+    });
+
+    const text = clone.innerText || clone.textContent || "";
+    const lines = text.split("\\n")
+        .map(l => l.trim())
+        .filter(l => l.length > 3);
+    return lines.join("\\n");
+}
+"""
+
 
 def _build_dom_summary(elements: list[dict]) -> str:
     """Build a compact one-line-per-element DOM summary.
@@ -439,6 +472,36 @@ class PlaywrightEngine(BrowserEngine):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    async def extract_page_text(
+        self, max_length: int = 8000,
+    ) -> str:
+        """Extract readable text from the current page.
+
+        Runs JavaScript to collect text from the main content
+        area, stripping nav, footer, script, and style elements.
+
+        Args:
+            max_length: Maximum character length of the output.
+
+        Returns:
+            Cleaned text content from the page body.
+
+        Raises:
+            BrowserError: If text extraction fails.
+        """
+        page = self._require_page()
+        try:
+            text: str = await page.evaluate(
+                _EXTRACT_PAGE_TEXT_JS,
+            )
+            if len(text) > max_length:
+                return text[:max_length] + "\n...(truncated)"
+            return text
+        except Exception as exc:
+            raise BrowserError(
+                f"Failed to extract page text: {exc}"
+            ) from exc
 
     def _require_page(self) -> Page:
         """Return the active page or raise ``BrowserError``.

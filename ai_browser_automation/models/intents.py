@@ -31,16 +31,27 @@ class ParsedIntent:
 
     Args:
         intent_type: The category of action the user wants to perform.
-        target_description: Natural-language description of the target element.
-        parameters: Additional key-value parameters for the intent.
+        target_description: Natural-language description of the target
+            element.
+        parameters: Additional key-value parameters for the intent
+            (e.g. url, limit, data_type, sort_by).
         confidence: Model confidence score in the range [0.0, 1.0].
+        execution_order: Sequence number for ordered execution within
+            a composite intent (1-based, 0 means unset).
+        assumptions: Implicit assumptions the parser made about the
+            user's command.
+        requires_clarification: Whether the intent is ambiguous and
+            would benefit from user clarification.
         sub_intents: Child intents when ``intent_type`` is ``COMPOSITE``.
     """
 
     intent_type: IntentType
     target_description: str
-    parameters: dict[str, str] = field(default_factory=dict)
+    parameters: dict[str, object] = field(default_factory=dict)
     confidence: float = 0.0
+    execution_order: int = 0
+    assumptions: list[str] = field(default_factory=list)
+    requires_clarification: bool = False
     sub_intents: list[ParsedIntent] = field(default_factory=list)
 
 

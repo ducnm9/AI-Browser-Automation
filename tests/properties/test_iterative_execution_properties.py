@@ -372,6 +372,7 @@ def _make_executor_with_goal_after_n(
         original_goal: str,
         page_context: object,
         history: list,
+        intents: object = None,
     ) -> NextStepResult:
         nonlocal call_count
         history_lengths.append(len(history))

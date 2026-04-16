@@ -21,40 +21,72 @@ from ai_browser_automation.security.security_layer import SecurityLayer
 logger = logging.getLogger(__name__)
 
 _PARSE_PROMPT_TEMPLATE = """\
-You are an intent parser for a browser automation system.
-Analyse the following user command and extract structured intents.
+You are a high-precision intent parser for a browser automation agent.
+Your task is to convert a natural language user command into \
+structured, executable intents.
+Return ONLY valid JSON (no markdown, no explanation).
 
-Return ONLY valid JSON (no markdown fences) with this schema:
+OUTPUT SCHEMA:
 {{
   "intents": [
     {{
-      "intent_type": "<one of: navigate, click, type_text, \
-extract_data, login, scroll, wait, screenshot, composite>",
-      "target_description": "<natural-language description>",
-      "parameters": {{}},
-      "confidence": <float 0.0-1.0>,
+      "intent_type": "<navigate | click | type_text | extract_data \
+| login | scroll | wait | screenshot | composite>",
+      "target_description": "<clear natural-language description \
+of the target>",
+      "parameters": {{
+        "url": "<string | null>",
+        "text": "<string | null>",
+        "selector_hint": "<string | null>",
+        "data_type": "<list | detail | text | null>",
+        "limit": "<number | null>",
+        "sort_by": "<latest | relevance | null>",
+        "timeout_ms": "<number | null>"
+      }},
+      "execution_order": <integer>,
+      "confidence": <0.0-1.0>,
+      "assumptions": ["<implicit assumption 1>"],
+      "requires_clarification": <true | false>,
       "sub_intents": []
     }}
   ]
 }}
 
-Rules:
-- If the command contains multiple combined actions (e.g. go to a \
-website AND do something there), you MUST return a single intent \
-with intent_type "composite" and populate sub_intents with each \
-individual action.
-- Each sub_intent follows the same schema (no nested sub_intents).
-- confidence must be between 0.0 and 1.0.
-- Always return at least one intent.
-- IMPORTANT: Look for implicit multi-step goals. Commands like \
-"open site X and get/find/read Y" require at minimum: \
-a "navigate" sub_intent AND one or more additional sub_intents \
-(click, extract_data, etc.) to fulfil the complete goal.
-- A command that mentions both a URL/website AND an information \
-retrieval goal is ALWAYS composite — never reduce it to just \
-"navigate".
+CORE RULES:
+1. MULTI-STEP DETECTION
+   - If the command involves navigation + any action -> MUST use \
+"composite"
+   - Decompose into ordered sub_intents
+   - Each sub_intent must include execution_order starting from 1
 
-User command: {user_input}
+2. NORMALIZATION
+   - Convert domain names into full URLs \
+(e.g. "24h.com.vn" -> "https://24h.com.vn")
+   - Convert vague quantities into parameters:
+     "latest" -> sort_by = "latest"
+     "5 items" -> limit = 5
+
+3. EXTRACTION LOGIC
+   - If user asks for multiple items -> data_type = "list"
+   - If user asks for one specific item -> data_type = "detail"
+
+4. TARGET RESOLUTION
+   - Use descriptive phrases, not selectors
+   - Example: "top news section", "search bar", "login button"
+
+5. AMBIGUITY HANDLING
+   - If something is unclear:
+     set requires_clarification = true
+     still produce best-effort assumptions
+
+6. MINIMIZE OVER-SPLITTING
+   - Only split into sub_intents when actions are sequentially \
+dependent
+
+7. STRICT OUTPUT
+   - No extra text, no markdown, no comments
+
+USER COMMAND: {user_input}
 """
 
 _CLARIFY_PROMPT_TEMPLATE = """\
@@ -197,7 +229,7 @@ class NLProcessor:
             NLProcessingError: On invalid JSON or missing fields.
         """
         try:
-            data = json.loads(content)
+            data = json.loads(self._strip_fences(content))
         except json.JSONDecodeError as exc:
             raise NLProcessingError(
                 f"Failed to parse LLM response as JSON: {exc}"
@@ -218,6 +250,9 @@ class NLProcessor:
     def _build_intent(self, raw: dict) -> ParsedIntent:
         """Build a single ``ParsedIntent`` from a raw dict.
 
+        Handles both the old schema (minimal fields) and the new
+        enriched schema (execution_order, assumptions, etc.).
+
         Args:
             raw: Dictionary with intent fields from the LLM.
 
@@ -236,8 +271,27 @@ class NLProcessor:
 
         target = raw.get("target_description", "")
         params = raw.get("parameters", {})
+        if not isinstance(params, dict):
+            params = {}
+        # Strip null values from parameters
+        params = {
+            k: v for k, v in params.items() if v is not None
+        }
         confidence = self._clamp_confidence(
             raw.get("confidence", 0.0),
+        )
+
+        execution_order = int(
+            raw.get("execution_order", 0) or 0,
+        )
+        raw_assumptions = raw.get("assumptions", [])
+        assumptions: list[str] = (
+            [str(a) for a in raw_assumptions]
+            if isinstance(raw_assumptions, list)
+            else []
+        )
+        requires_clarification = bool(
+            raw.get("requires_clarification", False),
         )
 
         sub_intents: list[ParsedIntent] = []
@@ -253,6 +307,9 @@ class NLProcessor:
             target_description=target,
             parameters=params,
             confidence=confidence,
+            execution_order=execution_order,
+            assumptions=assumptions,
+            requires_clarification=requires_clarification,
             sub_intents=sub_intents,
         )
 
@@ -271,6 +328,25 @@ class NLProcessor:
         except (TypeError, ValueError):
             return 0.0
         return max(0.0, min(1.0, f))
+
+    @staticmethod
+    def _strip_fences(text: str) -> str:
+        """Remove markdown code fences from LLM output.
+
+        Args:
+            text: Raw LLM output, possibly wrapped in fences.
+
+        Returns:
+            Cleaned string with fences removed.
+        """
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            first_newline = cleaned.find("\n")
+            if first_newline != -1:
+                cleaned = cleaned[first_newline + 1:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        return cleaned.strip()
 
 
 __all__ = ["NLProcessor"]

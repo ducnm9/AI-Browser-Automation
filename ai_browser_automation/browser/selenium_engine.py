@@ -558,6 +558,47 @@ class SeleniumEngine(BrowserEngine):
                 f"Failed to extract page context: {exc}"
             ) from exc
 
+    async def extract_page_text(
+        self, max_length: int = 8000,
+    ) -> str:
+        """Extract readable text from the current page.
+
+        Args:
+            max_length: Maximum character length of the output.
+
+        Returns:
+            Cleaned text content from the page body.
+
+        Raises:
+            BrowserError: If text extraction fails.
+        """
+        driver = self._require_driver()
+        js = """
+        var clone = document.body.cloneNode(true);
+        var remove = 'nav, footer, header, script, style, '
+                   + 'noscript, svg, iframe, form';
+        clone.querySelectorAll(remove).forEach(
+            function(el) { el.remove(); }
+        );
+        return (clone.innerText || clone.textContent || "");
+        """
+        try:
+            text: str = await self._run_sync(
+                partial(driver.execute_script, js),
+            )
+            lines = [
+                ln.strip() for ln in text.split("\n")
+                if ln.strip()
+            ]
+            result = "\n".join(lines)
+            if len(result) > max_length:
+                return result[:max_length] + "\n...(truncated)"
+            return result
+        except Exception as exc:
+            raise BrowserError(
+                f"Failed to extract page text: {exc}"
+            ) from exc
+
 
 __all__ = [
     "SeleniumEngine",

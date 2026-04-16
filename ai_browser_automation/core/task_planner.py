@@ -42,6 +42,30 @@ _DEFAULT_RETRY_COUNT = 3
 _MAX_ELEMENTS_JSON_CHARS = 4000
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """Remove markdown code fences from LLM output.
+
+    Many LLMs wrap JSON in triple-backtick fences despite being
+    told not to.  This helper strips them so ``json.loads()``
+    succeeds.
+
+    Args:
+        text: Raw LLM output, possibly wrapped in fences.
+
+    Returns:
+        Cleaned string with fences removed and whitespace
+        stripped.
+    """
+    import re
+
+    cleaned = text.strip()
+    cleaned = re.sub(
+        r"^```(?:json)?\s*\n?", "", cleaned,
+    )
+    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+    return cleaned.strip()
+
+
 def _compact_elements_json(
     elements: list[dict],
     max_chars: int = _MAX_ELEMENTS_JSON_CHARS,
@@ -144,16 +168,19 @@ Screenshot available: {has_screenshot}
 
 _PLAN_NEXT_STEP_TEMPLATE = """\
 You are a browser automation assistant executing a multi-step task.
-Given the original goal, current page context, and history of previous \
-steps, decide the NEXT single action to take.
+Given the original goal, parsed user intents, current page context, \
+and history of previous steps, decide the NEXT single action OR \
+report that the goal is reached.
 
 Return ONLY valid JSON (no markdown fences) with this schema:
 {{
   "goal_reached": <true|false>,
-  "reasoning": "<brief explanation of your decision>",
+  "reasoning": "<your answer / summary when goal is reached, \
+or brief explanation of the next step>",
   "step": {{
     "action_type": "<one of: navigate, click, type, type_text, \
-wait, extract, extract_data, extract_table, scroll, screenshot, login>",
+wait, extract, extract_data, extract_table, scroll, screenshot, \
+login>",
     "selector_strategy": "<one of: css, xpath, text, ai_vision>",
     "selector_value": "<selector expression or description>",
     "input_value": "<text to type or URL, or null>",
@@ -163,32 +190,50 @@ wait, extract, extract_data, extract_table, scroll, screenshot, login>",
   }}
 }}
 
-Rules:
-- If the goal is fully achieved based on the page context and history, \
-set "goal_reached" to true and set "step" to null.
-- If more actions are needed, set "goal_reached" to false and provide \
-the next single step.
-- Use history to avoid repeating failed actions.
-- Every step MUST have a non-empty selector_value.
-- timeout_ms must be between 1000 and 60000.
-- IMPORTANT: If the user's goal involves reading, searching, or \
-retrieving information from a page, you MUST use an extract action \
-(extract, extract_data, or extract_table) to capture the relevant \
-content BEFORE setting goal_reached to true. Do NOT set goal_reached \
-to true until the requested data has been extracted.
-- When setting goal_reached to true, include a concise summary of \
-the results or findings in the "reasoning" field.
-- Use the "Content on page" section below to understand what data \
-is available. Use CSS selectors from content snippets to target \
-the right elements for extraction.
-- For news/article extraction, prefer using a broad CSS selector \
-that captures multiple items (e.g. a class shared by article \
-containers) rather than extracting one item at a time.
-- If the goal asks for a specific number of items (e.g. "5 tin moi \
-nhat"), use extract_data with a selector that matches the article \
-list container, then summarise in the goal_reached reasoning.
+DECISION RULES:
+
+1. WHEN TO SET goal_reached = true:
+   - The "Content on page" section below already contains enough \
+data to answer the user's goal.
+   - You have already navigated to the correct page AND the \
+content snippets show the requested information.
+   - Put your COMPLETE answer in "reasoning" — include titles, \
+links, numbers, or whatever the user asked for.
+   - Set "step" to null.
+
+2. WHEN TO PLAN A BROWSER ACTION (goal_reached = false):
+   - The page has not been navigated to yet (e.g. about:blank).
+   - The current page does not contain the needed information.
+   - You need to click, scroll, or interact to reveal content.
+   - Provide exactly ONE step.
+
+3. CONTENT-FIRST APPROACH:
+   - ALWAYS check "Content on page" FIRST before planning any \
+browser extract action.
+   - If the content snippets already contain the data the user \
+wants (titles, links, prices, etc.), set goal_reached = true \
+and summarise the data in "reasoning". Do NOT plan an extract \
+action when you can already see the answer.
+   - Only plan a browser action when the content is genuinely \
+missing or insufficient.
+
+4. USING PARSED INTENTS:
+   - The "Parsed intents" section tells you exactly what the \
+user wants: data_type (list/detail), limit (number of items), \
+sort_by (latest/relevance), etc.
+   - Use these parameters to shape your answer. For example, \
+if limit=5, return exactly 5 items in your reasoning.
+
+5. SELECTOR STRATEGY:
+   - Prefer "text" strategy for human-readable element matching.
+   - Use "css" only when you can see a reliable selector in the \
+visible elements or content snippets.
+   - Use history to avoid repeating failed selectors.
 
 Original goal: {original_goal}
+
+Parsed intents:
+{intents_summary}
 
 Current page context:
 URL: {url}
@@ -318,17 +363,21 @@ class TaskPlanner:
         original_goal: str,
         page_context: PageContext,
         history: list[IterationRecord],
+        intents: list[ParsedIntent] | None = None,
     ) -> NextStepResult:
         """Plan the next step in iterative execution.
 
-        Builds a prompt from the goal, current page context, and
-        history of previous steps, then asks the LLM for the next
-        single action or a goal-reached signal.
+        Builds a prompt from the goal, current page context,
+        parsed intents, and history of previous steps, then asks
+        the LLM for the next single action or a goal-reached
+        signal.
 
         Args:
             original_goal: The original user goal.
             page_context: Current browser page snapshot.
             history: Previous iteration records (may be empty).
+            intents: Parsed user intents with structured
+                parameters (limit, data_type, etc.).
 
         Returns:
             A ``NextStepResult`` with either the next step or
@@ -339,9 +388,11 @@ class TaskPlanner:
                 cannot be parsed into a valid result.
         """
         history_summary = self._format_history(history)
+        intents_summary = self._format_intents(intents)
 
         prompt = _PLAN_NEXT_STEP_TEMPLATE.format(
             original_goal=original_goal,
+            intents_summary=intents_summary,
             url=page_context.url,
             title=page_context.title,
             dom_summary=page_context.dom_summary,
@@ -415,6 +466,44 @@ class TaskPlanner:
         }
 
     @staticmethod
+    def _format_intents(
+        intents: list[ParsedIntent] | None,
+    ) -> str:
+        """Format parsed intents as a compact summary for prompts.
+
+        Expands composite intents and includes structured
+        parameters (limit, data_type, sort_by, etc.) so the
+        planner LLM can use them for decision-making.
+
+        Args:
+            intents: Parsed user intents (may be None).
+
+        Returns:
+            Human-readable summary string. Returns ``"(none)"``
+            when intents is None or empty.
+        """
+        if not intents:
+            return "(none)"
+
+        expanded = TaskPlanner._expand_intents(intents)
+        lines: list[str] = []
+        for idx, intent in enumerate(expanded, start=1):
+            params_parts: list[str] = []
+            for key, val in intent.parameters.items():
+                params_parts.append(f"{key}={val}")
+            params_str = (
+                ", ".join(params_parts)
+                if params_parts
+                else "none"
+            )
+            lines.append(
+                f"{idx}. {intent.intent_type.value}: "
+                f"{intent.target_description} "
+                f"[{params_str}]"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
     def _format_history(
         history: list[IterationRecord],
     ) -> str:
@@ -455,6 +544,8 @@ class TaskPlanner:
     ) -> NextStepResult:
         """Parse LLM JSON into a ``NextStepResult``.
 
+        Strips markdown code fences if present before parsing.
+
         Args:
             content: Raw JSON string from the LLM.
 
@@ -465,8 +556,9 @@ class TaskPlanner:
             PlanningError: On invalid JSON or missing/invalid
                 fields.
         """
+        cleaned = _strip_markdown_fences(content)
         try:
-            data = json.loads(content.strip())
+            data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             raise PlanningError(
                 "Failed to parse plan_next_step response "
@@ -524,7 +616,9 @@ class TaskPlanner:
             PlanningError: On invalid JSON or missing/invalid fields.
         """
         try:
-            data = json.loads(content.strip())
+            data = json.loads(
+                _strip_markdown_fences(content),
+            )
         except json.JSONDecodeError as exc:
             raise PlanningError(
                 f"Failed to parse plan response as JSON: {exc}"
@@ -563,7 +657,9 @@ class TaskPlanner:
             PlanningError: On invalid JSON or empty steps.
         """
         try:
-            data = json.loads(content.strip())
+            data = json.loads(
+                _strip_markdown_fences(content),
+            )
         except json.JSONDecodeError as exc:
             raise PlanningError(
                 f"Failed to parse replan response as JSON: "

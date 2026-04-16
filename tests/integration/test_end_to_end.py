@@ -201,6 +201,12 @@ class _FakeBrowserEngine(BrowserEngine):
         """Return a placeholder table."""
         return [["Header1", "Header2"], ["Cell1", "Cell2"]]
 
+    async def extract_page_text(
+        self, max_length: int = 8000,
+    ) -> str:
+        """Return placeholder page text."""
+        return "Sample page text content for testing."
+
     async def close(self) -> None:
         """Record close."""
         self.closed = True

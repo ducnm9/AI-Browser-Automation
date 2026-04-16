@@ -146,6 +146,7 @@ class AIBrowserAutomation:
             task_planner=self._task_planner,
             action_executor=self._action_executor,
             browser_engine=self._browser_engine,
+            llm_router=self._llm_router,
         )
 
         self._initialized = True
@@ -373,6 +374,15 @@ class AIBrowserAutomation:
             return True
 
         flat_intents = TaskPlanner._expand_intents(intents)
+
+        # Any EXTRACT_DATA intent benefits from the iterative
+        # pipeline's LLM extract fallback, even without navigate
+        has_extract = any(
+            i.intent_type is IntentType.EXTRACT_DATA
+            for i in flat_intents
+        )
+        if has_extract:
+            return True
 
         # Multiple distinct intent types → iterative
         if len(flat_intents) >= 2:
