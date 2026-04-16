@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 _MAX_VISIBLE_ELEMENTS = 50
 _TEXT_TRUNCATE_LENGTH = 100
+_MAX_CONTENT_SNIPPETS = 30
+_CONTENT_TEXT_LENGTH = 200
 
 # JavaScript snippet executed via page.evaluate() to extract visible
 # interactable elements from the current page DOM.
@@ -49,6 +51,66 @@ _EXTRACT_ELEMENTS_JS = """
     })).filter(el => el.visible);
 }
 """ % (_MAX_VISIBLE_ELEMENTS, _TEXT_TRUNCATE_LENGTH)
+
+# JavaScript snippet to extract content elements (headings,
+# articles, paragraphs) for data-extraction planning.
+_EXTRACT_CONTENT_JS = """
+() => {
+    const sel = 'h1, h2, h3, h4, article, .article, '
+              + '[class*="title"], [class*="headline"], '
+              + '.item-news, .title-news';
+    const nodes = document.querySelectorAll(sel);
+    return Array.from(nodes).slice(0, %d).map(el => {
+        const link = el.querySelector('a');
+        return {
+            tag: el.tagName.toLowerCase(),
+            text: (el.textContent || "").trim().substring(0, %d),
+            href: link ? link.getAttribute("href") : null,
+            class_name: el.className
+                ? el.className.substring(0, 80)
+                : null,
+            selector: el.id
+                ? "#" + el.id
+                : el.tagName.toLowerCase()
+                  + (el.className
+                     ? "." + el.className.split(" ")[0]
+                     : "")
+        };
+    }).filter(el => el.text.length > 0);
+}
+""" % (_MAX_CONTENT_SNIPPETS, _CONTENT_TEXT_LENGTH)
+
+
+def _build_dom_summary(elements: list[dict]) -> str:
+    """Build a compact one-line-per-element DOM summary.
+
+    Produces a much smaller string than ``str(elements)`` so the
+    LLM prompt stays within the model's context window.
+
+    Args:
+        elements: Visible interactable elements from the page.
+
+    Returns:
+        Compact multi-line summary string.
+    """
+    lines: list[str] = []
+    for el in elements:
+        tag = el.get("tag", "?")
+        text = (el.get("text") or "")[:60]
+        eid = el.get("id") or ""
+        href = (el.get("href") or "")[:80]
+        parts = [tag]
+        if eid:
+            parts.append(f'id="{eid}"')
+        if href:
+            parts.append(f'href="{href}"')
+        if text:
+            parts.append(f'"{text}"')
+        lines.append(" ".join(parts))
+    return (
+        f"{len(elements)} interactive elements:\n"
+        + "\n".join(lines)
+    )
 
 
 
@@ -252,11 +314,63 @@ class PlaywrightEngine(BrowserEngine):
         page = self._require_page()
         resolved = self._resolve_selector(selector, strategy)
         try:
-            return await page.text_content(resolved) or ""
+            locator = page.locator(resolved).first
+            return await locator.inner_text() or ""
         except Exception as exc:
             raise BrowserError(
                 f"Extract text failed for '{resolved}': {exc}"
             ) from exc
+
+    async def extract_table(
+        self, selector: str, strategy: str = "css",
+    ) -> list[list[str]]:
+        """Extract tabular data from an HTML table element.
+
+        Locates the table matching the given selector and returns its
+        contents as a list of rows, where each row is a list of cell
+        text strings.  Both ``<th>`` and ``<td>`` cells are included,
+        and whitespace is stripped from every cell value.
+
+        Args:
+            selector: Selector pointing to the target table element.
+            strategy: Selector strategy (``css``, ``xpath``, ``text``).
+
+        Returns:
+            List of rows, each row a list of stripped cell text values.
+            Returns an empty list when the table contains no rows.
+
+        Raises:
+            BrowserError: If no table element matches the selector.
+        """
+        page = self._require_page()
+        resolved = self._resolve_selector(selector, strategy)
+
+        js_extract = """
+        (selector) => {
+            const table = document.querySelector(selector);
+            if (!table) return null;
+            const rows = table.querySelectorAll('tr');
+            return Array.from(rows).map(row => {
+                const cells = row.querySelectorAll('th, td');
+                return Array.from(cells).map(
+                    cell => cell.textContent.trim()
+                );
+            });
+        }
+        """
+        try:
+            result = await page.evaluate(js_extract, resolved)
+        except Exception as exc:
+            raise BrowserError(
+                f"Extract table failed for '{resolved}': {exc}"
+            ) from exc
+
+        if result is None:
+            raise BrowserError(
+                f"Table not found for selector: '{resolved}'"
+            )
+
+        return result
 
     # ------------------------------------------------------------------
     # Observation
@@ -282,14 +396,13 @@ class PlaywrightEngine(BrowserEngine):
     async def get_page_context(self) -> PageContext:
         """Retrieve the current page context for AI analysis.
 
-        Extracts up to 50 visible interactable elements (``a``,
-        ``button``, ``input``, ``select``, ``textarea``,
-        ``[role="button"]``, ``[onclick]``) using
+        Extracts up to 50 visible interactable elements and up to
+        30 content snippets (headings, articles) using
         ``page.evaluate()``.
 
         Returns:
-            PageContext with URL, title, DOM summary, and visible
-            elements.
+            PageContext with URL, title, DOM summary, visible
+            elements, and content snippets.
 
         Raises:
             BrowserError: If page context extraction fails.
@@ -301,12 +414,22 @@ class PlaywrightEngine(BrowserEngine):
             elements: list[dict] = await page.evaluate(
                 _EXTRACT_ELEMENTS_JS,
             )
-            dom_summary = str(elements)
+            try:
+                content: list[dict] = await page.evaluate(
+                    _EXTRACT_CONTENT_JS,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Content extraction failed: %s", exc,
+                )
+                content = []
+            dom_summary = _build_dom_summary(elements)
             return PageContext(
                 url=url,
                 title=title,
                 dom_summary=dom_summary,
                 visible_elements=elements,
+                content_snippets=content,
             )
         except Exception as exc:
             raise BrowserError(

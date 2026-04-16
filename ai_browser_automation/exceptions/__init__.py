@@ -7,6 +7,7 @@ from ai_browser_automation.exceptions.errors import (
     AppError,
     BrowserError,
     ConfigValidationError,
+    IterativeExecutionError,
     LLMUnavailableError,
     NLProcessingError,
     PlanningError,
@@ -22,4 +23,5 @@ __all__ = [
     "ConfigValidationError",
     "ActionExecutionError",
     "PlanningError",
+    "IterativeExecutionError",
 ]

@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from ai_browser_automation.browser.base import PageContext
+
 
 @dataclass
 class ActionStep:
@@ -75,8 +77,40 @@ class ActionResult:
     duration_ms: float = 0.0
 
 
+@dataclass
+class IterationRecord:
+    """Result of one iteration in the Observe-Plan-Act loop.
+
+    Args:
+        step: The action step that was executed.
+        result: The execution result.
+        page_context_before: Page context before executing the step.
+    """
+
+    step: ActionStep
+    result: ActionResult
+    page_context_before: PageContext
+
+
+@dataclass
+class NextStepResult:
+    """Result from plan_next_step — next step or goal_reached signal.
+
+    Args:
+        step: Next action step (None when goal_reached is True).
+        goal_reached: True when the LLM confirms the goal is complete.
+        reasoning: Brief explanation from the LLM about the decision.
+    """
+
+    step: Optional[ActionStep] = None
+    goal_reached: bool = False
+    reasoning: str = ""
+
+
 __all__ = [
     "ActionStep",
     "ExecutionPlan",
     "ActionResult",
+    "IterationRecord",
+    "NextStepResult",
 ]

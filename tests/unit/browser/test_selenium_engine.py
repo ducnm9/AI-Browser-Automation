@@ -256,6 +256,71 @@ class TestNavigation:
 
 
 # ------------------------------------------------------------------ #
+# extract_table()
+# ------------------------------------------------------------------ #
+
+class TestExtractTable:
+    """Tests for SeleniumEngine.extract_table()."""
+
+    @pytest.mark.asyncio
+    async def test_extract_table_returns_rows(self) -> None:
+        """extract_table() returns list of rows from JS result."""
+        engine, mock_driver = _make_engine_with_mocks()
+        mock_driver.execute_script.return_value = [
+            ["Name", "Score"],
+            ["Alice", "100"],
+        ]
+        result = await engine.extract_table("table.scores")
+        assert result == [["Name", "Score"], ["Alice", "100"]]
+        mock_driver.execute_script.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_extract_table_empty_table(self) -> None:
+        """extract_table() returns empty list for no rows."""
+        engine, mock_driver = _make_engine_with_mocks()
+        mock_driver.execute_script.return_value = []
+        result = await engine.extract_table("table.empty")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_extract_table_not_found_raises(self) -> None:
+        """extract_table() raises BrowserError when not found."""
+        engine, mock_driver = _make_engine_with_mocks()
+        mock_driver.execute_script.return_value = None
+        with pytest.raises(BrowserError, match="Table not found"):
+            await engine.extract_table("table.missing")
+
+    @pytest.mark.asyncio
+    async def test_extract_table_js_error_raises(self) -> None:
+        """extract_table() wraps JS errors in BrowserError."""
+        engine, mock_driver = _make_engine_with_mocks()
+        mock_driver.execute_script.side_effect = RuntimeError(
+            "JS error",
+        )
+        with pytest.raises(
+            BrowserError, match="Extract table failed",
+        ):
+            await engine.extract_table("table")
+
+    @pytest.mark.asyncio
+    async def test_extract_table_passes_strategy(self) -> None:
+        """extract_table() passes selector and strategy to JS."""
+        engine, mock_driver = _make_engine_with_mocks()
+        mock_driver.execute_script.return_value = [["cell"]]
+        await engine.extract_table("//table", strategy="xpath")
+        call_args = mock_driver.execute_script.call_args
+        assert call_args[0][1] == "//table"
+        assert call_args[0][2] == "xpath"
+
+    @pytest.mark.asyncio
+    async def test_extract_table_not_launched(self) -> None:
+        """extract_table() raises BrowserError before launch."""
+        engine = SeleniumEngine()
+        with pytest.raises(BrowserError, match="not launched"):
+            await engine.extract_table("table")
+
+
+# ------------------------------------------------------------------ #
 # screenshot()
 # ------------------------------------------------------------------ #
 

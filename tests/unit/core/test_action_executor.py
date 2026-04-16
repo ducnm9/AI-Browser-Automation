@@ -12,6 +12,7 @@ from ai_browser_automation.browser.base import BrowserEngine
 from ai_browser_automation.core.action_executor import ActionExecutor
 from ai_browser_automation.exceptions.errors import (
     ActionExecutionError,
+    BrowserError,
 )
 from ai_browser_automation.llm.base import LLMResponse
 from ai_browser_automation.llm.router import LLMRouter
@@ -373,3 +374,67 @@ class TestSmartRetry:
 
         # smart_retry calls route once per invocation
         assert mock_router.route.call_count == retry_count
+
+
+# ------------------------------------------------------------------ #
+# extract_table action tests
+# ------------------------------------------------------------------ #
+
+class TestExtractTableAction:
+    """Tests for extract_table action handling in execute_step.
+
+    Validates: Requirements 5.1, 5.2, 5.3
+    """
+
+    @pytest.mark.asyncio
+    async def test_extract_table_success_returns_json(
+        self,
+        executor: ActionExecutor,
+        mock_browser: AsyncMock,
+    ) -> None:
+        """Successful extract_table returns JSON in extracted_data."""
+        table_data = [
+            ["Team A", "vs", "Team B", "20:00"],
+            ["Team C", "vs", "Team D", "22:00"],
+        ]
+        mock_browser.extract_table = AsyncMock(
+            return_value=table_data,
+        )
+
+        step = _step(
+            "extract_table",
+            "table.schedule",
+            selector_strategy="css",
+        )
+        result = await executor.execute_step(step)
+
+        assert result.success is True
+        assert result.extracted_data is not None
+        assert json.loads(result.extracted_data) == table_data
+        mock_browser.extract_table.assert_awaited_once_with(
+            "table.schedule", strategy="css",
+        )
+
+    @pytest.mark.asyncio
+    async def test_extract_table_browser_error_returns_failure(
+        self,
+        executor: ActionExecutor,
+        mock_browser: AsyncMock,
+    ) -> None:
+        """BrowserError during extract_table returns failure result."""
+        mock_browser.extract_table = AsyncMock(
+            side_effect=BrowserError(
+                "Table not found for selector: 'table.missing'"
+            ),
+        )
+
+        step = _step(
+            "extract_table",
+            "table.missing",
+            selector_strategy="css",
+        )
+        result = await executor.execute_step(step)
+
+        assert result.success is False
+        assert result.error_message is not None
+        assert "Table not found" in result.error_message

@@ -26,6 +26,8 @@ class PageContext:
         title: The page title.
         dom_summary: Simplified DOM tree for LLM consumption.
         visible_elements: List of visible interactable elements.
+        content_snippets: Text snippets from content elements
+            (headings, articles, paragraphs) for data extraction.
         screenshot: Optional screenshot bytes of the page.
     """
 
@@ -33,6 +35,7 @@ class PageContext:
     title: str
     dom_summary: str
     visible_elements: list[dict] = field(default_factory=list)
+    content_snippets: list[dict] = field(default_factory=list)
     screenshot: Optional[bytes] = None
 
 
@@ -124,6 +127,30 @@ class BrowserEngine(ABC):
 
         Returns:
             Screenshot image as bytes.
+        """
+        ...
+
+    @abstractmethod
+    async def extract_table(
+        self, selector: str, strategy: str = "css",
+    ) -> list[list[str]]:
+        """Extract tabular data from an HTML table element.
+
+        Locates the table matching the given selector and returns its
+        contents as a list of rows, where each row is a list of cell
+        text strings.  Both ``<th>`` and ``<td>`` cells are included,
+        and whitespace is stripped from every cell value.
+
+        Args:
+            selector: Selector pointing to the target table element.
+            strategy: Selector strategy (css, xpath, text).
+
+        Returns:
+            List of rows, each row a list of stripped cell text values.
+            Returns an empty list when the table contains no rows.
+
+        Raises:
+            BrowserError: If no table element matches the selector.
         """
         ...
 

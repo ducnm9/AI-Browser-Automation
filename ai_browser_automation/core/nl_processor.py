@@ -39,11 +39,20 @@ extract_data, login, scroll, wait, screenshot, composite>",
 }}
 
 Rules:
-- If the command contains multiple combined actions, return a \
-single intent with intent_type "composite" and populate sub_intents.
+- If the command contains multiple combined actions (e.g. go to a \
+website AND do something there), you MUST return a single intent \
+with intent_type "composite" and populate sub_intents with each \
+individual action.
 - Each sub_intent follows the same schema (no nested sub_intents).
 - confidence must be between 0.0 and 1.0.
 - Always return at least one intent.
+- IMPORTANT: Look for implicit multi-step goals. Commands like \
+"open site X and get/find/read Y" require at minimum: \
+a "navigate" sub_intent AND one or more additional sub_intents \
+(click, extract_data, etc.) to fulfil the complete goal.
+- A command that mentions both a URL/website AND an information \
+retrieval goal is ALWAYS composite — never reduce it to just \
+"navigate".
 
 User command: {user_input}
 """

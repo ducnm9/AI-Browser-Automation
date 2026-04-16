@@ -1,7 +1,8 @@
 """Unit tests for AIBrowserAutomation facade (app.py).
 
 Tests cover __init__, initialize, chat pipeline, shutdown,
-error handling, sensitive-data routing, and confidence checks.
+error handling, sensitive-data routing, confidence checks,
+iterative routing, and IterativeExecutionError handling.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from ai_browser_automation.app import (
 from ai_browser_automation.browser.base import PageContext
 from ai_browser_automation.exceptions.errors import (
     AppError,
+    IterativeExecutionError,
     NLProcessingError,
 )
 from ai_browser_automation.models.actions import (
@@ -399,3 +401,134 @@ class TestShutdown:
         await app.shutdown()
 
         assert app._initialized is False
+
+
+# ------------------------------------------------------------------ #
+# _needs_iterative_execution routing
+# ------------------------------------------------------------------ #
+
+class TestNeedsIterativeExecution:
+    """Tests for _needs_iterative_execution() routing logic.
+
+    Validates: Requirements 6.1, 6.2, 6.3
+    """
+
+    def test_navigate_plus_click_returns_true(
+        self, app: AIBrowserAutomation,
+    ) -> None:
+        """NAVIGATE + CLICK → iterative execution required."""
+        intents = [
+            ParsedIntent(
+                intent_type=IntentType.NAVIGATE,
+                target_description="go to site",
+                confidence=0.9,
+            ),
+            ParsedIntent(
+                intent_type=IntentType.CLICK,
+                target_description="click button",
+                confidence=0.9,
+            ),
+        ]
+        assert app._needs_iterative_execution(intents) is True
+
+    def test_only_navigate_returns_false(
+        self, app: AIBrowserAutomation,
+    ) -> None:
+        """Only NAVIGATE intents → legacy pipeline."""
+        intents = [
+            ParsedIntent(
+                intent_type=IntentType.NAVIGATE,
+                target_description="go to site",
+                confidence=0.9,
+            ),
+        ]
+        assert app._needs_iterative_execution(intents) is False
+
+    def test_only_click_returns_false(
+        self, app: AIBrowserAutomation,
+    ) -> None:
+        """Only CLICK (no NAVIGATE) → legacy pipeline."""
+        intents = [
+            ParsedIntent(
+                intent_type=IntentType.CLICK,
+                target_description="click button",
+                confidence=0.9,
+            ),
+        ]
+        assert app._needs_iterative_execution(intents) is False
+
+    def test_composite_with_navigate_and_extract_returns_true(
+        self, app: AIBrowserAutomation,
+    ) -> None:
+        """COMPOSITE containing NAVIGATE + EXTRACT_DATA → iterative."""
+        composite = ParsedIntent(
+            intent_type=IntentType.COMPOSITE,
+            target_description="multi-step task",
+            confidence=0.9,
+            sub_intents=[
+                ParsedIntent(
+                    intent_type=IntentType.NAVIGATE,
+                    target_description="go to site",
+                    confidence=0.9,
+                ),
+                ParsedIntent(
+                    intent_type=IntentType.EXTRACT_DATA,
+                    target_description="get table",
+                    confidence=0.9,
+                ),
+            ],
+        )
+        assert (
+            app._needs_iterative_execution([composite]) is True
+        )
+
+
+# ------------------------------------------------------------------ #
+# IterativeExecutionError handling in chat()
+# ------------------------------------------------------------------ #
+
+class TestIterativeExecutionErrorHandling:
+    """Tests for IterativeExecutionError caught in chat().
+
+    Validates: Requirement 8.3
+    """
+
+    @pytest.mark.asyncio()
+    async def test_iterative_error_returns_message_and_stabilises(
+        self, app: AIBrowserAutomation,
+    ) -> None:
+        """IterativeExecutionError → error message + browser stable."""
+        mocks = _init_app_with_mocks(app)
+
+        # Set up intents that trigger iterative path
+        nav_intent = ParsedIntent(
+            intent_type=IntentType.NAVIGATE,
+            target_description="go to site",
+            confidence=0.9,
+        )
+        click_intent = ParsedIntent(
+            intent_type=IntentType.CLICK,
+            target_description="click button",
+            confidence=0.9,
+        )
+        mocks["nl"].parse.return_value = [
+            nav_intent, click_intent,
+        ]
+
+        # Wire iterative executor mock that raises the error
+        mock_iter_exec = AsyncMock()
+        mock_iter_exec.execute.side_effect = (
+            IterativeExecutionError("browser crashed mid-loop")
+        )
+        app._iterative_executor = mock_iter_exec
+
+        result = await app.chat(
+            "go to site and click button",
+        )
+
+        # Error message returned to user
+        assert "Error:" in result
+        assert "browser crashed mid-loop" in result
+
+        # Browser stability check was called
+        mocks["browser"].get_page_context.assert_awaited()

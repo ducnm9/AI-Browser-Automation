@@ -6,6 +6,8 @@ from ai_browser_automation.models.actions import (
     ActionResult,
     ActionStep,
     ExecutionPlan,
+    IterationRecord,
+    NextStepResult,
 )
 from ai_browser_automation.models.config import (
     AppConfig,
@@ -29,7 +31,9 @@ __all__ = [
     "ConversationTurn",
     "ExecutionPlan",
     "IntentType",
+    "IterationRecord",
     "LLMProvider",
+    "NextStepResult",
     "ParsedIntent",
     "SecurityPolicy",
 ]

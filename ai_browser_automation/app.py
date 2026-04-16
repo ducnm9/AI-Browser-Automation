@@ -17,9 +17,14 @@ from typing import Optional
 from ai_browser_automation.browser.base import BrowserEngine
 from ai_browser_automation.browser.factory import BrowserEngineFactory
 from ai_browser_automation.core.action_executor import ActionExecutor
+from ai_browser_automation.core.iterative_executor import IterativeExecutor
 from ai_browser_automation.core.nl_processor import NLProcessor
 from ai_browser_automation.core.task_planner import TaskPlanner
-from ai_browser_automation.exceptions.errors import AppError
+from ai_browser_automation.models.intents import IntentType, ParsedIntent
+from ai_browser_automation.exceptions.errors import (
+    AppError,
+    IterativeExecutionError,
+)
 from ai_browser_automation.llm.bedrock_provider import BedrockProvider
 from ai_browser_automation.llm.factory import LLMProviderFactory
 from ai_browser_automation.llm.gemini_provider import GeminiProvider
@@ -57,9 +62,12 @@ def _format_results(results: list[ActionResult]) -> str:
     total_count = len(results)
 
     parts: list[str] = []
+    max_display = 2000
     for r in results:
         if r.success:
             detail = r.extracted_data or "OK"
+            if len(detail) > max_display:
+                detail = detail[:max_display] + "... (truncated)"
             parts.append(f"[OK] {r.step.action_type}: {detail}")
         else:
             parts.append(
@@ -90,6 +98,7 @@ class AIBrowserAutomation:
         self._nl_processor: Optional[NLProcessor] = None
         self._task_planner: Optional[TaskPlanner] = None
         self._action_executor: Optional[ActionExecutor] = None
+        self._iterative_executor: Optional[IterativeExecutor] = None
         self._history = ConversationHistory()
         self._initialized = False
 
@@ -130,6 +139,13 @@ class AIBrowserAutomation:
         self._task_planner = TaskPlanner(self._llm_router)
         self._action_executor = ActionExecutor(
             self._browser_engine, self._llm_router,
+        )
+
+        # Iterative executor via DI
+        self._iterative_executor = IterativeExecutor(
+            task_planner=self._task_planner,
+            action_executor=self._action_executor,
+            browser_engine=self._browser_engine,
         )
 
         self._initialized = True
@@ -285,23 +301,31 @@ class AIBrowserAutomation:
             )
             return f"Xin hãy làm rõ: {clarification}"
 
-        # Step 4: Get page context
-        page_context = (
-            await self._browser_engine.get_page_context()
-        )
+        # Step 4: Route to iterative or legacy pipeline
+        if self._needs_iterative_execution(intents):
+            assert (  # noqa: S101
+                self._iterative_executor is not None
+            )
+            results = await self._iterative_executor.execute(
+                original_goal=user_input,
+                intents=intents,
+            )
+        else:
+            # Legacy pipeline: get context → plan → execute
+            page_context = (
+                await self._browser_engine.get_page_context()
+            )
+            plan = await self._task_planner.plan(
+                intents, page_context,
+            )
+            results = (
+                await self._action_executor.execute_plan(plan)
+            )
 
-        # Step 5: Plan
-        plan = await self._task_planner.plan(
-            intents, page_context,
-        )
-
-        # Step 6: Execute
-        results = await self._action_executor.execute_plan(plan)
-
-        # Step 7: Format results
+        # Step 5: Format results
         summary = _format_results(results)
 
-        # Step 8: Update conversation history
+        # Step 6: Update conversation history
         self._history.add_turn(ConversationTurn(
             role="user",
             content=user_input,
@@ -319,6 +343,53 @@ class AIBrowserAutomation:
             self._security.mask_for_log(summary),
         )
         return summary
+
+    def _needs_iterative_execution(
+        self,
+        intents: list[ParsedIntent],
+    ) -> bool:
+        """Determine whether the request requires iterative execution.
+
+        Expands composite intents via ``TaskPlanner._expand_intents()``
+        and checks whether the flattened list contains more than one
+        distinct intent, or if any original intent is COMPOSITE
+        (even with empty sub_intents, indicating the LLM recognised
+        a multi-step goal but failed to enumerate sub-steps).
+
+        Args:
+            intents: Parsed user intents (may include composites).
+
+        Returns:
+            True if the request should be routed to the iterative
+            pipeline; False for single-action or navigate-only
+            requests.
+        """
+        # Any COMPOSITE intent signals a multi-step goal
+        has_composite = any(
+            i.intent_type is IntentType.COMPOSITE
+            for i in intents
+        )
+        if has_composite:
+            return True
+
+        flat_intents = TaskPlanner._expand_intents(intents)
+
+        # Multiple distinct intent types → iterative
+        if len(flat_intents) >= 2:
+            intent_types = {i.intent_type for i in flat_intents}
+            if len(intent_types) > 1:
+                return True
+
+        # Classic check: NAVIGATE + something else
+        has_navigate = any(
+            i.intent_type is IntentType.NAVIGATE
+            for i in flat_intents
+        )
+        has_other = any(
+            i.intent_type is not IntentType.NAVIGATE
+            for i in flat_intents
+        )
+        return has_navigate and has_other
 
     async def _ensure_browser_stable(self) -> None:
         """Best-effort attempt to leave the browser in a usable state."""

@@ -96,13 +96,15 @@ class LMStudioProvider(BaseLLMProvider):
                 f"LM Studio connection failed: {exc}",
             ) from exc
         except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500] if exc.response else "N/A"
             logger.error(
-                "LM Studio HTTP error %s: %s",
+                "LM Studio HTTP error %s: %s — body: %s",
                 exc.response.status_code,
                 exc,
+                body,
             )
             raise LLMUnavailableError(
-                f"LM Studio HTTP error {exc.response.status_code}",
+                f"LM Studio HTTP error {exc.response.status_code}: {body}",
             ) from exc
 
         latency_ms = (time.monotonic() - start) * 1000

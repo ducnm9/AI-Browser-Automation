@@ -16,14 +16,20 @@ from ai_browser_automation.browser.base import PageContext
 from ai_browser_automation.exceptions.errors import PlanningError
 from ai_browser_automation.llm.base import LLMRequest, LLMResponse
 from ai_browser_automation.llm.router import LLMRouter
-from ai_browser_automation.models.actions import ActionStep, ExecutionPlan
+from ai_browser_automation.models.actions import (
+    ActionStep,
+    ExecutionPlan,
+    IterationRecord,
+    NextStepResult,
+)
 from ai_browser_automation.models.intents import IntentType, ParsedIntent
 
 logger = logging.getLogger(__name__)
 
 _VALID_ACTION_TYPES = {
     "navigate", "click", "type", "type_text", "wait",
-    "extract", "extract_data", "scroll", "screenshot", "login",
+    "extract", "extract_data", "extract_table", "scroll",
+    "screenshot", "login",
 }
 
 _VALID_SELECTOR_STRATEGIES = {"css", "xpath", "text", "ai_vision"}
@@ -32,6 +38,31 @@ _MIN_TIMEOUT_MS = 1000
 _MAX_TIMEOUT_MS = 60000
 _DEFAULT_TIMEOUT_MS = 10000
 _DEFAULT_RETRY_COUNT = 3
+
+_MAX_ELEMENTS_JSON_CHARS = 4000
+
+
+def _compact_elements_json(
+    elements: list[dict],
+    max_chars: int = _MAX_ELEMENTS_JSON_CHARS,
+) -> str:
+    """Serialize visible elements as compact JSON, capped by size.
+
+    Uses ``separators=(",", ":")`` to minimise whitespace and
+    truncates the output to *max_chars* so the LLM prompt stays
+    within the model's context window.
+
+    Args:
+        elements: Visible interactable elements from the page.
+        max_chars: Maximum character length for the output.
+
+    Returns:
+        Compact JSON string, possibly truncated with ``"…]"``.
+    """
+    raw = json.dumps(elements, separators=(",", ":"))
+    if len(raw) <= max_chars:
+        return raw
+    return raw[:max_chars] + "…]"
 
 _PLAN_PROMPT_TEMPLATE = """\
 You are a browser automation task planner.
@@ -111,6 +142,68 @@ Screenshot available: {has_screenshot}
 """
 
 
+_PLAN_NEXT_STEP_TEMPLATE = """\
+You are a browser automation assistant executing a multi-step task.
+Given the original goal, current page context, and history of previous \
+steps, decide the NEXT single action to take.
+
+Return ONLY valid JSON (no markdown fences) with this schema:
+{{
+  "goal_reached": <true|false>,
+  "reasoning": "<brief explanation of your decision>",
+  "step": {{
+    "action_type": "<one of: navigate, click, type, type_text, \
+wait, extract, extract_data, extract_table, scroll, screenshot, login>",
+    "selector_strategy": "<one of: css, xpath, text, ai_vision>",
+    "selector_value": "<selector expression or description>",
+    "input_value": "<text to type or URL, or null>",
+    "wait_condition": "<JS expression or null>",
+    "timeout_ms": <int 1000-60000>,
+    "retry_count": <int 0-10>
+  }}
+}}
+
+Rules:
+- If the goal is fully achieved based on the page context and history, \
+set "goal_reached" to true and set "step" to null.
+- If more actions are needed, set "goal_reached" to false and provide \
+the next single step.
+- Use history to avoid repeating failed actions.
+- Every step MUST have a non-empty selector_value.
+- timeout_ms must be between 1000 and 60000.
+- IMPORTANT: If the user's goal involves reading, searching, or \
+retrieving information from a page, you MUST use an extract action \
+(extract, extract_data, or extract_table) to capture the relevant \
+content BEFORE setting goal_reached to true. Do NOT set goal_reached \
+to true until the requested data has been extracted.
+- When setting goal_reached to true, include a concise summary of \
+the results or findings in the "reasoning" field.
+- Use the "Content on page" section below to understand what data \
+is available. Use CSS selectors from content snippets to target \
+the right elements for extraction.
+- For news/article extraction, prefer using a broad CSS selector \
+that captures multiple items (e.g. a class shared by article \
+containers) rather than extracting one item at a time.
+- If the goal asks for a specific number of items (e.g. "5 tin moi \
+nhat"), use extract_data with a selector that matches the article \
+list container, then summarise in the goal_reached reasoning.
+
+Original goal: {original_goal}
+
+Current page context:
+URL: {url}
+Title: {title}
+DOM summary: {dom_summary}
+Visible elements: {visible_elements}
+
+Content on page:
+{content_snippets}
+
+Previous steps:
+{history}
+"""
+
+
 class TaskPlanner:
     """Convert parsed intents into an executable browser action plan.
 
@@ -156,8 +249,8 @@ class TaskPlanner:
             url=page_context.url,
             title=page_context.title,
             dom_summary=page_context.dom_summary,
-            visible_elements=json.dumps(
-                page_context.visible_elements, indent=2,
+            visible_elements=_compact_elements_json(
+                page_context.visible_elements,
             ),
             intents_json=intents_json,
         )
@@ -220,6 +313,62 @@ class TaskPlanner:
 
         return self._parse_steps(response.content)
 
+    async def plan_next_step(
+        self,
+        original_goal: str,
+        page_context: PageContext,
+        history: list[IterationRecord],
+    ) -> NextStepResult:
+        """Plan the next step in iterative execution.
+
+        Builds a prompt from the goal, current page context, and
+        history of previous steps, then asks the LLM for the next
+        single action or a goal-reached signal.
+
+        Args:
+            original_goal: The original user goal.
+            page_context: Current browser page snapshot.
+            history: Previous iteration records (may be empty).
+
+        Returns:
+            A ``NextStepResult`` with either the next step or
+            ``goal_reached=True``.
+
+        Raises:
+            PlanningError: When the LLM call fails or the response
+                cannot be parsed into a valid result.
+        """
+        history_summary = self._format_history(history)
+
+        prompt = _PLAN_NEXT_STEP_TEMPLATE.format(
+            original_goal=original_goal,
+            url=page_context.url,
+            title=page_context.title,
+            dom_summary=page_context.dom_summary,
+            visible_elements=_compact_elements_json(
+                page_context.visible_elements,
+            ),
+            content_snippets=_compact_elements_json(
+                page_context.content_snippets,
+                max_chars=3000,
+            ),
+            history=history_summary,
+        )
+
+        logger.debug("Sending plan_next_step request to LLM")
+
+        try:
+            response: LLMResponse = await self.llm_router.route(
+                LLMRequest(prompt=prompt),
+            )
+        except Exception as exc:
+            raise PlanningError(
+                f"LLM request failed during plan_next_step: "
+                f"{exc}"
+            ) from exc
+
+        return self._parse_next_step_response(response.content)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
@@ -264,6 +413,101 @@ class TaskPlanner:
             "parameters": intent.parameters,
             "confidence": intent.confidence,
         }
+
+    @staticmethod
+    def _format_history(
+        history: list[IterationRecord],
+    ) -> str:
+        """Summarise iteration history for inclusion in a prompt.
+
+        Keeps the most recent 5 iterations to limit prompt size.
+
+        Args:
+            history: List of previous iteration records.
+
+        Returns:
+            Human-readable summary string. Returns ``"(none)"``
+            when history is empty.
+        """
+        if not history:
+            return "(none)"
+
+        recent = history[-5:]
+        lines: list[str] = []
+        for idx, record in enumerate(recent, start=1):
+            status = (
+                "OK" if record.result.success else "FAILED"
+            )
+            error_part = ""
+            if record.result.error_message:
+                error_part = (
+                    f" — error: {record.result.error_message}"
+                )
+            lines.append(
+                f"{idx}. {record.step.action_type}"
+                f"({record.step.selector_value})"
+                f" → {status}{error_part}"
+            )
+        return "\n".join(lines)
+
+    def _parse_next_step_response(
+        self, content: str,
+    ) -> NextStepResult:
+        """Parse LLM JSON into a ``NextStepResult``.
+
+        Args:
+            content: Raw JSON string from the LLM.
+
+        Returns:
+            A validated ``NextStepResult``.
+
+        Raises:
+            PlanningError: On invalid JSON or missing/invalid
+                fields.
+        """
+        try:
+            data = json.loads(content.strip())
+        except json.JSONDecodeError as exc:
+            raise PlanningError(
+                "Failed to parse plan_next_step response "
+                f"as JSON: {exc}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise PlanningError(
+                "plan_next_step response must be a "
+                "JSON object."
+            )
+
+        if "goal_reached" not in data:
+            raise PlanningError(
+                "plan_next_step response missing "
+                "'goal_reached' field."
+            )
+
+        goal_reached = bool(data["goal_reached"])
+        reasoning = str(data.get("reasoning", ""))
+
+        if goal_reached:
+            return NextStepResult(
+                step=None,
+                goal_reached=True,
+                reasoning=reasoning,
+            )
+
+        raw_step = data.get("step")
+        if not isinstance(raw_step, dict):
+            raise PlanningError(
+                "plan_next_step response must contain a "
+                "'step' object when goal_reached is false."
+            )
+
+        step = self._build_step(raw_step)
+        return NextStepResult(
+            step=step,
+            goal_reached=False,
+            reasoning=reasoning,
+        )
 
     def _parse_plan_response(
         self, content: str,

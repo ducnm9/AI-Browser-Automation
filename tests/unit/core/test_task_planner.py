@@ -546,3 +546,171 @@ class TestReplan:
             await planner.replan(
                 failed, "error", b"screenshot",
             )
+
+
+# ── plan_next_step (Req 2.1, 2.2, 2.3, 2.4) ────────────────────────
+
+
+class TestPlanNextStep:
+    """Requirements 2.1–2.4: plan_next_step returns NextStepResult."""
+
+    @pytest.mark.asyncio()
+    async def test_goal_reached_true_returns_step_none(
+        self,
+        planner: TaskPlanner,
+        mock_router: MagicMock,
+        page_context: PageContext,
+    ) -> None:
+        """Req 2.2: goal_reached=True → step is None."""
+        mock_router.route.return_value = _llm_response(
+            json.dumps({
+                "goal_reached": True,
+                "reasoning": "All done",
+                "step": None,
+            }),
+        )
+
+        result = await planner.plan_next_step(
+            "Buy shoes", page_context, [],
+        )
+
+        assert result.goal_reached is True
+        assert result.step is None
+        assert result.reasoning == "All done"
+
+    @pytest.mark.asyncio()
+    async def test_goal_reached_false_returns_valid_step(
+        self,
+        planner: TaskPlanner,
+        mock_router: MagicMock,
+        page_context: PageContext,
+    ) -> None:
+        """Req 2.1, 2.3: goal_reached=False → valid ActionStep."""
+        mock_router.route.return_value = _llm_response(
+            json.dumps({
+                "goal_reached": False,
+                "reasoning": "Need to navigate first",
+                "step": {
+                    "action_type": "navigate",
+                    "selector_strategy": "css",
+                    "selector_value": "body",
+                    "input_value": "https://example.com",
+                    "wait_condition": None,
+                    "timeout_ms": 15000,
+                    "retry_count": 2,
+                },
+            }),
+        )
+
+        result = await planner.plan_next_step(
+            "Open example.com", page_context, [],
+        )
+
+        assert result.goal_reached is False
+        assert result.step is not None
+        assert result.step.action_type == "navigate"
+        assert result.step.selector_strategy == "css"
+        assert result.step.selector_value == "body"
+        assert result.step.input_value == "https://example.com"
+        assert result.step.timeout_ms == 15000
+        assert result.step.retry_count == 2
+        assert result.reasoning == "Need to navigate first"
+
+    @pytest.mark.asyncio()
+    async def test_invalid_json_raises_planning_error(
+        self,
+        planner: TaskPlanner,
+        mock_router: MagicMock,
+        page_context: PageContext,
+    ) -> None:
+        """Req 2.4: invalid JSON → PlanningError."""
+        mock_router.route.return_value = _llm_response(
+            "this is not json at all",
+        )
+
+        with pytest.raises(PlanningError, match="JSON"):
+            await planner.plan_next_step(
+                "Do something", page_context, [],
+            )
+
+    @pytest.mark.asyncio()
+    async def test_missing_goal_reached_raises_planning_error(
+        self,
+        planner: TaskPlanner,
+        mock_router: MagicMock,
+        page_context: PageContext,
+    ) -> None:
+        """Req 2.4: missing goal_reached field → PlanningError."""
+        mock_router.route.return_value = _llm_response(
+            json.dumps({
+                "reasoning": "oops",
+                "step": None,
+            }),
+        )
+
+        with pytest.raises(
+            PlanningError, match="goal_reached",
+        ):
+            await planner.plan_next_step(
+                "Do something", page_context, [],
+            )
+
+    def test_format_history_empty_returns_none_string(
+        self,
+        planner: TaskPlanner,
+    ) -> None:
+        """_format_history with empty list returns '(none)'."""
+        result = planner._format_history([])
+        assert result == "(none)"
+
+    def test_format_history_with_records(
+        self,
+        planner: TaskPlanner,
+        page_context: PageContext,
+    ) -> None:
+        """_format_history with records returns formatted summary."""
+        from ai_browser_automation.models.actions import (
+            ActionResult,
+            ActionStep,
+            IterationRecord,
+        )
+
+        step_ok = ActionStep(
+            action_type="navigate",
+            selector_strategy="css",
+            selector_value="body",
+            input_value="https://example.com",
+        )
+        result_ok = ActionResult(success=True, step=step_ok)
+
+        step_fail = ActionStep(
+            action_type="click",
+            selector_strategy="css",
+            selector_value="#btn",
+        )
+        result_fail = ActionResult(
+            success=False,
+            step=step_fail,
+            error_message="Element not found",
+        )
+
+        history = [
+            IterationRecord(
+                step=step_ok,
+                result=result_ok,
+                page_context_before=page_context,
+            ),
+            IterationRecord(
+                step=step_fail,
+                result=result_fail,
+                page_context_before=page_context,
+            ),
+        ]
+
+        formatted = planner._format_history(history)
+
+        assert "navigate" in formatted
+        assert "OK" in formatted
+        assert "click" in formatted
+        assert "FAILED" in formatted
+        assert "Element not found" in formatted

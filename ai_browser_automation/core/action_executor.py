@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Optional
 
@@ -30,6 +31,36 @@ from ai_browser_automation.models.actions import (
 logger = logging.getLogger(__name__)
 
 _EXTRACT_ACTIONS = {"extract", "extract_data"}
+
+_URL_IN_SELECTOR_RE = re.compile(
+    r'https?://[^\s\'">\]]+',
+)
+
+
+def _extract_url(raw: str) -> str:
+    """Extract a real URL if the value looks like a CSS selector.
+
+    When the LLM mistakenly returns a CSS selector such as
+    ``a[href="https://example.com"]`` instead of a plain URL,
+    this helper extracts the embedded URL.
+
+    Args:
+        raw: Raw value from the action step (URL or selector).
+
+    Returns:
+        A clean URL string.
+    """
+    stripped = raw.strip()
+    if stripped.startswith("http://") or stripped.startswith(
+        "https://",
+    ):
+        if "[" not in stripped:
+            return stripped
+    match = _URL_IN_SELECTOR_RE.search(stripped)
+    if match:
+        url = match.group(0).rstrip('"\']')
+        return url
+    return stripped
 
 _SMART_RETRY_PROMPT = """\
 A browser automation step failed. Analyse the error and suggest an \
@@ -184,8 +215,9 @@ class ActionExecutor:
             action = step.action_type.lower()
 
             if action == "navigate":
+                raw_url = step.input_value or step.selector_value
                 await self.browser.navigate(
-                    step.input_value or step.selector_value,
+                    _extract_url(raw_url),
                 )
 
             elif action == "click":
@@ -207,6 +239,17 @@ class ActionExecutor:
                         step.selector_value,
                         strategy=step.selector_strategy,
                     )
+                )
+
+            elif action == "extract_table":
+                table_data = (
+                    await self.browser.extract_table(
+                        step.selector_value,
+                        strategy=step.selector_strategy,
+                    )
+                )
+                extracted_data = json.dumps(
+                    table_data, ensure_ascii=False,
                 )
 
             elif action == "screenshot":

@@ -75,6 +75,14 @@ class PlanningError(AppError):
     """
 
 
+class IterativeExecutionError(AppError):
+    """Raised when the iterative execution loop encounters an unrecoverable error.
+
+    Args:
+        message: Human-readable error description.
+    """
+
+
 __all__ = [
     "AppError",
     "LLMUnavailableError",
@@ -84,4 +92,5 @@ __all__ = [
     "ConfigValidationError",
     "ActionExecutionError",
     "PlanningError",
+    "IterativeExecutionError",
 ]

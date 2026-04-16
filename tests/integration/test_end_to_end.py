@@ -195,6 +195,12 @@ class _FakeBrowserEngine(BrowserEngine):
             ],
         )
 
+    async def extract_table(
+        self, selector: str, strategy: str = "css",
+    ) -> list[list[str]]:
+        """Return a placeholder table."""
+        return [["Header1", "Header2"], ["Cell1", "Cell2"]]
+
     async def close(self) -> None:
         """Record close."""
         self.closed = True

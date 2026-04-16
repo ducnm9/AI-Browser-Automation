@@ -164,19 +164,32 @@ class TestNavigation:
     """Tests for navigate, click, type_text, extract_text."""
 
     @pytest.mark.asyncio
-    async def test_navigate_calls_goto(self) -> None:
-        """navigate() delegates to page.goto()."""
+    async def test_navigate_calls_goto_with_domcontentloaded(
+        self,
+    ) -> None:
+        """navigate() delegates to page.goto() with domcontentloaded."""
         engine, mock_page = _make_engine_with_mocks()
         await engine.navigate("https://example.com")
         mock_page.goto.assert_awaited_once_with(
-            "https://example.com", wait_until="domcontentloaded",
+            "https://example.com",
+            wait_until="domcontentloaded",
         )
 
     @pytest.mark.asyncio
-    async def test_navigate_wraps_error(self) -> None:
-        """navigate() wraps errors in BrowserError."""
+    async def test_navigate_timeout_raises_browser_error(self) -> None:
+        """navigate() raises BrowserError when networkidle times out."""
         engine, mock_page = _make_engine_with_mocks()
-        mock_page.goto.side_effect = RuntimeError("timeout")
+        mock_page.goto.side_effect = TimeoutError(
+            "Timeout 30000ms exceeded waiting for networkidle"
+        )
+        with pytest.raises(BrowserError, match="Navigation"):
+            await engine.navigate("https://slow.example.com")
+
+    @pytest.mark.asyncio
+    async def test_navigate_wraps_error(self) -> None:
+        """navigate() wraps generic errors in BrowserError."""
+        engine, mock_page = _make_engine_with_mocks()
+        mock_page.goto.side_effect = RuntimeError("connection refused")
         with pytest.raises(BrowserError, match="Navigation"):
             await engine.navigate("https://bad.example")
 
@@ -210,17 +223,27 @@ class TestNavigation:
 
     @pytest.mark.asyncio
     async def test_extract_text_returns_content(self) -> None:
-        """extract_text() returns text_content from page."""
+        """extract_text() returns inner_text from locator."""
         engine, mock_page = _make_engine_with_mocks()
-        mock_page.text_content = AsyncMock(return_value="Hello")
+        mock_locator = MagicMock()
+        mock_locator.first = MagicMock()
+        mock_locator.first.inner_text = AsyncMock(
+            return_value="Hello",
+        )
+        mock_page.locator = MagicMock(return_value=mock_locator)
         result = await engine.extract_text("#el")
         assert result == "Hello"
 
     @pytest.mark.asyncio
     async def test_extract_text_returns_empty_on_none(self) -> None:
-        """extract_text() returns '' when text_content is None."""
+        """extract_text() returns '' when inner_text is None."""
         engine, mock_page = _make_engine_with_mocks()
-        mock_page.text_content = AsyncMock(return_value=None)
+        mock_locator = MagicMock()
+        mock_locator.first = MagicMock()
+        mock_locator.first.inner_text = AsyncMock(
+            return_value=None,
+        )
+        mock_page.locator = MagicMock(return_value=mock_locator)
         result = await engine.extract_text("#el")
         assert result == ""
 
@@ -324,3 +347,72 @@ class TestResolveSelector:
         assert PlaywrightEngine._resolve_selector(
             "Submit", "text",
         ) == "text=Submit"
+
+
+# ------------------------------------------------------------------ #
+# extract_table()
+# ------------------------------------------------------------------ #
+
+class TestExtractTable:
+    """Tests for PlaywrightEngine.extract_table()."""
+
+    @pytest.mark.asyncio
+    async def test_extract_table_returns_rows(self) -> None:
+        """extract_table() returns list of rows from page.evaluate()."""
+        engine, mock_page = _make_engine_with_mocks()
+        table_data = [
+            ["Name", "Age"],
+            ["Alice", "30"],
+            ["Bob", "25"],
+        ]
+        mock_page.evaluate = AsyncMock(return_value=table_data)
+        result = await engine.extract_table("table.scores")
+        assert result == table_data
+        mock_page.evaluate.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_extract_table_empty_table(self) -> None:
+        """extract_table() returns empty list for table with no rows."""
+        engine, mock_page = _make_engine_with_mocks()
+        mock_page.evaluate = AsyncMock(return_value=[])
+        result = await engine.extract_table("table.empty")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_extract_table_no_match_raises(self) -> None:
+        """extract_table() raises BrowserError when no table found."""
+        engine, mock_page = _make_engine_with_mocks()
+        mock_page.evaluate = AsyncMock(return_value=None)
+        with pytest.raises(BrowserError, match="Table not found"):
+            await engine.extract_table("table.missing")
+
+    @pytest.mark.asyncio
+    async def test_extract_table_js_error_raises(self) -> None:
+        """extract_table() wraps JS errors in BrowserError."""
+        engine, mock_page = _make_engine_with_mocks()
+        mock_page.evaluate = AsyncMock(
+            side_effect=RuntimeError("JS error"),
+        )
+        with pytest.raises(
+            BrowserError, match="Extract table failed",
+        ):
+            await engine.extract_table("table.bad")
+
+    @pytest.mark.asyncio
+    async def test_extract_table_xpath_strategy(self) -> None:
+        """extract_table() resolves xpath strategy correctly."""
+        engine, mock_page = _make_engine_with_mocks()
+        mock_page.evaluate = AsyncMock(return_value=[["A"]])
+        result = await engine.extract_table(
+            "//table", strategy="xpath",
+        )
+        assert result == [["A"]]
+        call_args = mock_page.evaluate.call_args
+        assert call_args[0][1] == "xpath=//table"
+
+    @pytest.mark.asyncio
+    async def test_extract_table_not_launched_raises(self) -> None:
+        """extract_table() raises BrowserError before launch."""
+        engine = PlaywrightEngine()
+        with pytest.raises(BrowserError, match="not launched"):
+            await engine.extract_table("table")
